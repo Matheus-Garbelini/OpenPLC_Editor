@@ -42,6 +42,7 @@ from weakref import WeakKeyDictionary
 from functools import reduce
 from distutils.dir_util import copy_tree
 from six.moves import xrange
+import sys
 
 import wx
 
@@ -64,6 +65,8 @@ import targets
 from runtime.typemapping import DebugTypesSize, UnpackDebugBuffer
 from runtime import PlcStatus
 from ConfigTreeNode import ConfigTreeNode, XSDSchemaErrorMessage
+from editors.ConfTreeNodeEditor import ConfTreeNodeEditor
+import xml.etree.ElementTree as ET
 
 base_folder = paths.AbsParentDir(__file__)
 
@@ -206,6 +209,15 @@ def GetProjectControllerXSD():
                                for libname, _lib, default in features.libraries]) + """
               </xsd:complexType>
             </xsd:element>""") if len(features.libraries) > 0 else '') + """
+            <xsd:element name="PLCPlantSimulator" minOccurs="0">
+                <xsd:complexType>
+                    <xsd:attribute name="Enable_model" type="xsd:boolean" use="optional" default="false"/>
+                    <xsd:attribute name="Script_name" type="xsd:string" use="optional" default=""/>
+                    <xsd:attribute name="Sample_rate" type="xsd:string" use="optional" default="1.0"/>
+                    <xsd:attribute name="Simulation_time" type="xsd:string" use="optional" default="inf"/>
+                    <xsd:attribute name="Script_args" type="xsd:string" use="optional" default=""/>
+                </xsd:complexType>
+            </xsd:element>
           </xsd:sequence>
           <xsd:attribute name="URI_location" type="xsd:string" use="optional" default=""/>
           <xsd:attribute name="Disable_Extensions" type="xsd:boolean" use="optional" default="false"/>
@@ -273,6 +285,9 @@ class ProjectController(ConfigTreeNode, PLCControler):
         self.StatusMethods = [dic.copy() for dic in self.StatusMethods]
         self.DebugToken = None
         self.debug_status = PlcStatus.Stopped
+
+
+
 
     def __del__(self):
         if self.DebugTimer:
@@ -478,6 +493,10 @@ class ProjectController(ConfigTreeNode, PLCControler):
         PLCControler.SetProjectProperties(self, properties={"scaling": {'LD': (10, 10)}})
         PLCControler.SetProjectProperties(self, properties={"scaling": {'SFC': (10, 10)}})
         # this will create files base XML files
+
+        # for child in root.iter():
+        #     if child.tag == 'clientid':
+        #         print(child.tag, child.text.strip())
         self.SaveProject()
         return None
 
@@ -506,6 +525,7 @@ class ProjectController(ConfigTreeNode, PLCControler):
         # Change XSD into class members
         self._AddParamsMembers()
         self.Children = {}
+
         # Keep track of the root confnode (i.e. project path)
         self.ProjectPath = ProjectPath
         self._setBuildPath(BuildPath)
@@ -513,6 +533,7 @@ class ProjectController(ConfigTreeNode, PLCControler):
         if os.path.isdir(self.CTNPath()) and os.path.isfile(self.ConfNodeXmlFilePath()):
             # Load the confnode.xml file into parameters members
             result = self.LoadXMLParams()
+            print result
             if result:
                 return result, False
             # Load and init all the children
@@ -764,8 +785,6 @@ class ProjectController(ConfigTreeNode, PLCControler):
                 a = line.split("AT %")
                 b = a[1].split(":")
                 modified_program += a[0] + ":" + b[1]
-                if(len(b) > 2):
-                    modified_program += ":" + b[2]
             else:
                 modified_program += line
 
@@ -826,7 +845,6 @@ class ProjectController(ConfigTreeNode, PLCControler):
             iec2c_libpath,
             buildpath,
             self._getIECcodepath())
-
         try:
             # Invoke compiler.
             # Output files are listed to stdout, errors to stderr
@@ -1022,6 +1040,7 @@ class ProjectController(ConfigTreeNode, PLCControler):
                         # Ignores numbers given in CSV file
                         # Idx=int(attrs["num"])
                         # Count variables only, ignore FBs
+                        attrs["name"] = attrs["C_path"].split(".")[-1] # Get the name of the variable
                         Idx += 1
                     self._VariablesList.append(attrs)
 
@@ -1046,9 +1065,12 @@ class ProjectController(ConfigTreeNode, PLCControler):
 
         # prepare debug code
         variable_decl_array = []
+        variable_decl_array_simple = []
         bofs = 0
         for v in self._DbgVariablesList:
+            self.logger.write("Var Name: "+str(v["name"])+"\n")
             sz = DebugTypesSize.get(v["type"], 0)
+            v["size"] = sz
             variable_decl_array += [
                 "{&(%(C_path)s), " % v +
                 {
@@ -1058,7 +1080,13 @@ class ProjectController(ConfigTreeNode, PLCControler):
                     "OUT": "%(type)s_O_ENUM",
                     "VAR": "%(type)s_ENUM"
                 }[v["vartype"]] % v +
-                "}"]
+                ', "' + v["name"] + '"'
+                ", " + str(v["size"]) +
+                ", " + v["num"] + '}']
+
+            variable_decl_array_simple += \
+                ["{&(%(C_path)s)}" % v]
+
             bofs += sz
         debug_code = targets.GetCode("plc_debug.c") % {
             "buffer_size": bofs,
@@ -1074,8 +1102,17 @@ class ProjectController(ConfigTreeNode, PLCControler):
                     "FB":  "extern       %(type)s   %(C_path)s;"
                 }[v["vartype"]] % v
                 for v in self._VariablesList if v["C_path"].find('.') < 0]),
-            "variable_decl_array": ",\n".join(variable_decl_array)
+            "variable_decl_array": ",\n".join(variable_decl_array),
+            "variable_decl_array_simple": ",\n".join(variable_decl_array_simple)
         }
+        # self.logger.write("_DbgVariablesList: "+str(self._DbgVariablesList)+"\n")
+        self._key_vars = {}
+        for v in self._DbgVariablesList:
+            self._key_vars[v["name"]] = {
+            "idx": v["num"],
+            "type": v["vartype"],
+            "size": v["size"]
+            }
 
         return debug_code
 
@@ -1285,6 +1322,12 @@ class ProjectController(ConfigTreeNode, PLCControler):
     def _showIECcode(self):
         self._OpenView("IEC code")
 
+    def _showConfiguration(self):
+        # Open Configuration View
+        self._OpenView(None)
+        # Selecte the Config menu
+        self._View.ConfNodeNoteBook.SetSelection(2)
+
     _IECRawCodeView = None
 
     def _editIECrawcode(self):
@@ -1397,6 +1440,7 @@ class ProjectController(ConfigTreeNode, PLCControler):
 
             return self._FileEditors.get(filepath)
         else:
+            pass
             return ConfigTreeNode._OpenView(self, self.CTNName(), onlyopened)
 
     def OnCloseEditor(self, view):
@@ -1762,13 +1806,23 @@ class ProjectController(ConfigTreeNode, PLCControler):
             self.DispatchDebugValuesTimer.Start(
                 int(REFRESH_PERIOD * 1000), oneShot=True)
 
+    def GetConfigXML(self, config_name):
+        tree = ET.ElementTree(ET.fromstring(self.XSD))
+        root = tree.getroot()
+        configs = root.find(".//*[@name='"+config_name+"']")
+        params = configs.findall('.//')
+        obj=[]
+        for param in params:
+            obj.append(param.attrib)
+        return obj
+
     def _Run(self):
         """
         Start PLC
         """
         self.BlockButtons()
         #Clean build folder
-        self._Clean()
+        # self._Clean()
 
         #Build Project
         if (self._Build() is False):
@@ -1787,7 +1841,41 @@ class ProjectController(ConfigTreeNode, PLCControler):
 
         #Run
         if self.GetIECProgramsAndVariables():
-            self._connector.StartPLC()
+
+            # Initialize config object with default params
+            config = {}
+            params = self.GetConfigXML('PLCPlantSimulator')
+            # Add default values
+            for param in params:
+                if 'default' in param:
+                    config[param['name']] = param['default']
+            # Add configured values
+            for param in self.BeremizRoot.PLCPlantSimulator.attrib:
+                config[param] = self.BeremizRoot.PLCPlantSimulator.attrib[param]
+
+            config["Platform"] = self.GetDefaultTargetName()
+            config["ProjectPath"] = self.ProjectPath
+            config["PLCVars"] = self._DbgVariablesList
+            self.logger.write(str(bool(config['Enable_model'])) + '\n')
+
+            # Save model config in this instance
+            self.model_config = config
+
+            if self.AppFrame.PouInstanceVariablesPanel.InstanceChoice.GetSelection() != -1:
+                try:
+                    # self.AppFrame.OpenFirstProgram()
+                    self.AppFrame.PouInstanceVariablesPanel.ParentWindow.OpenDebugViewer(
+                        self.AppFrame.PouInstanceVariablesPanel.PouInfos.var_class,
+                        self.AppFrame.PouInstanceVariablesPanel.InstanceChoice.GetStringSelection(),
+                        self.AppFrame.PouInstanceVariablesPanel.PouTagName)
+                except:
+                    pass
+            # Start PLC object with the project configuration
+            var_names = []
+            for v in self._DbgVariablesList:
+                var_names.append(v['name'])
+            self.logger.write("PLC Vars:" + str(var_names) + '\n')
+            self._connector.StartPLC(config)
             self.logger.write(_("Starting PLC\n"))
             self._connect_debug()
         else:
@@ -2017,13 +2105,6 @@ class ProjectController(ConfigTreeNode, PLCControler):
 
     StatusMethods = [
         {
-            "bitmap":    "Build",
-            "name":    _("Build"),
-            "tooltip": _("Build project into build folder"),
-            "method":   "_Build",
-            "shown":      False,
-        },
-        {
             "bitmap":    "Clean",
             "name":    _("Clean"),
             "tooltip": _("Clean project build folder"),
@@ -2037,6 +2118,13 @@ class ProjectController(ConfigTreeNode, PLCControler):
             "tooltip": _("Start PLC Simulation"),
             "method":   "_Run",
             "shown":      True,
+        },
+        {
+            "bitmap": "Build",
+            "name": _("Build"),
+            "tooltip": _("Build project into build folder"),
+            "method": "_Build",
+            "shown": True,
         },
         {
             "bitmap":    "Stop",
@@ -2074,6 +2162,13 @@ class ProjectController(ConfigTreeNode, PLCControler):
             "shown":      False,
         },
         {
+            "bitmap":    "down",
+            "name":    _("Generate Program"),
+            "tooltip": _("Generate program for OpenPLC Runtime"),
+            "method":   "_generateOpenPLC",
+            "shown":      True,
+        },
+                {
             "bitmap":    "ShowIECcode",
             "name":    _("Show code"),
             "tooltip": _("Show IEC code generated by PLCGenerator"),
@@ -2081,12 +2176,36 @@ class ProjectController(ConfigTreeNode, PLCControler):
             "shown":      False,
         },
         {
-            "bitmap":    "down",
-            "name":    _("Generate Program"),
-            "tooltip": _("Generate program for OpenPLC Runtime"),
-            "method":   "_generateOpenPLC",
-            "shown":      True,
+            "bitmap": "Compiler",
+            "name": _("Configuration"),
+            "tooltip": _("Project Configuration"),
+            "method": "_showConfiguration",
+            "shown": True,
         },
+        {
+            "name": _("EnableSimulation"),
+            "method": "BeremizRoot.PLCPlantSimulator.setEnable_model",
+            "read_method": "BeremizRoot.PLCPlantSimulator.getEnable_model",
+            "shown": True,
+            "type": "CheckBox",
+            "label": "Enable Model:"
+        },
+        {
+            "name": _("Simulation_time"),
+            "method": "BeremizRoot.PLCPlantSimulator.setSimulation_time",
+            "read_method": "BeremizRoot.PLCPlantSimulator.getSimulation_time",
+            "shown": True,
+            "type": "TextBox",
+            "label": "Simu. Time:"
+        },
+        {
+            "name": _("Sample_rate"),
+            "method": "BeremizRoot.PLCPlantSimulator.setSample_rate",
+            "read_method": "BeremizRoot.PLCPlantSimulator.getSample_rate",
+            "shown": True,
+            "type": "TextBox",
+            "label": "Sample Rate:"
+        }
     ]
 
     ConfNodeMethods = [

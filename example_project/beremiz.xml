@@ -1,0 +1,6 @@
+<?xml version='1.0' encoding='utf-8'?>
+<BeremizRoot xmlns:xsd="http://www.w3.org/2001/XMLSchema" URI_location="LOCAL://">
+  <TargetType/>
+  <Libraries Enable_SVGUI_Library="false" Enable_Etherlab_Library="false"/>
+  <PLCPlantSimulator Script_args="address=127.0.0.1;port=4000;wait_server=0" Enable_model="true" Script_name="model.py" Simulation_time="60" Sample_rate="30.0"/>
+</BeremizRoot>

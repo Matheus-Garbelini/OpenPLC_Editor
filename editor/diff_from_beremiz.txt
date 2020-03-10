@@ -26,4 +26,28 @@ Called .upper() on all strings to make it conform to other debug strings
  - BlockPreviewDialog.py
 Fixed refresh of graphic dialogs on Windows
 
+- PLCObject.py
+Added suport to load external python script to simulate a plant.
+The model must implement the methods setup and loop to configure and
+modify inputs/outpus of softPLC (new simulation thread added)
+
+- BeremizIDE.py
+Improved user experience:
+* Automatically load first recent project
+* Automatically open first project file (which usually is the ladder/structured code)
+
+- ProjectController.py
+* Added new options in the project configuration and new toolbar 
+items to configure the model and simulation
+* Added new parameters to be passed to the generate .c code. We have now access 
+to more reflection of the variables inside the softPLC
+* Removed Cleanup before compiling. Removing clenup saves a lot of time to start the simulation
+and makes debugging the model more pleasant (stopping and starting a simulation much faster).
+
+- targets/Linux and targets/Win32
+Added new mutexes to handle the simulation thread.
+if model is used, the setup() is called before the first PLC scan
+which is useful to set default input values without recompiling softPLC code again
+
+
 Also, images folder was changed with new icons and logos.

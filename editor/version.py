@@ -75,7 +75,7 @@ def GetAboutDialogInfo():
     info.Version = app_version
 
     info.Copyright = ""
-    info.Copyright += "(C) 2019 Thiago Alves"
+    info.Copyright += "(C) 2020 Thiago Alves"
     #info.Copyright += "(C) 2016-2018 Andrey Skvortsov\n"
     #info.Copyright += "(C) 2008-2018 Eduard Tisserant\n"
     #info.Copyright += "(C) 2008-2015 Laurent Bessard"
@@ -216,8 +216,7 @@ def GetAboutDialogInfo():
     return info
 
 
-app_version = "1.0"
-#rev = GetAppRevision()
-rev = "Release: 2019-09-20"
+app_version = "1.1"
+rev = GetAppRevision()
 if rev is not None:
-    app_version = app_version + "\n" + rev.rstrip()
+    app_version = app_version + "-" + rev.rstrip()

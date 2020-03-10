@@ -34,11 +34,26 @@ extern unsigned long greatest_tick_count__;
 
 /* Help to quit cleanly when init fail at a certain level */
 static int init_level = 0;
+static int simulation_enabled = 0;
 
 /*
  * Prototypes of functions exported by plugins
  **/
 %(calls_prototypes)s
+
+int WaitPLC(unsigned long *tick);
+void FinishPLC();
+int TryWaitSimu(void);
+void FinishSimu(void);
+void WaitSimu(void);
+
+void SetSimulationStatus(int enabled){
+    simulation_enabled = enabled;
+}
+
+uint8_t GetSimulationStatus(){
+    return simulation_enabled;
+}
 
 /*
  * Retrieve input variables, run PLC and publish output variables
@@ -48,12 +63,18 @@ void __run(void)
     __tick++;
     if (greatest_tick_count__)
         __tick %%= greatest_tick_count__;
+    
+    if (simulation_enabled)
+        WaitSimu();
 
     %(retrieve_calls)s
 
     /*__retrieve_debug();*/
 
     config_run__(__tick);
+
+    if (simulation_enabled)
+        FinishPLC();
 
     __publish_debug();
 

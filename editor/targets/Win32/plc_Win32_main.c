@@ -76,6 +76,8 @@ HANDLE debug_sem;
 HANDLE debug_wait_sem;
 HANDLE python_sem;
 HANDLE python_wait_sem;
+HANDLE simu_sem;
+HANDLE simu_wait_sem;
 
 #define maxval(a,b) ((a>b)?a:b)
 int startPLC(int argc,char **argv)
@@ -131,6 +133,29 @@ int startPLC(int argc,char **argv)
         return 1;
     }
 
+    simu_sem = CreateSemaphore(
+                            NULL,           // default security attributes
+                            0,              // initial count
+                            1,              // maximum count
+                            NULL);          // unnamed semaphore
+
+    if (simu_sem == NULL)
+    {
+        printf("startPLC CreateSemaphore simu_sem error: %d\n", GetLastError());
+        return 1;
+    }
+    simu_wait_sem = CreateSemaphore(
+                            NULL,           // default security attributes
+                            1,              // initial count
+                            1,              // maximum count
+                            NULL);          // unnamed semaphore
+
+
+    if (simu_wait_sem == NULL)
+    {
+        printf("startPLC CreateSemaphore simu_wait_sem error: %d\n", GetLastError());
+        return 1;
+    }
 
     /* Create a waitable timer */
     timeBeginPeriod(1);
@@ -151,6 +176,7 @@ int startPLC(int argc,char **argv)
     return 0;
 }
 static unsigned long __debug_tick;
+static unsigned long __simu_tick;
 
 int TryEnterDebugSection(void)
 {
@@ -176,6 +202,8 @@ int stopPLC()
     CloseHandle(PLC_timer);
     WaitForSingleObject(PLC_thread, INFINITE);
     __cleanup();
+    CloseHandle(simu_wait_sem);
+    CloseHandle(simu_sem);
     CloseHandle(debug_wait_sem);
     CloseHandle(debug_sem);
     CloseHandle(python_wait_sem);
@@ -224,14 +252,14 @@ void resumeDebug()
 int WaitPythonCommands(void)
 {
     /* Wait signal from PLC thread */
-	return WaitForSingleObject(python_wait_sem, INFINITE);
+    return WaitForSingleObject(python_wait_sem, INFINITE);
 }
 
 /* Called by PLC thread on each new python command*/
 void UnBlockPythonCommands(void)
 {
     /* signal debugger thread it can read data */
-	ReleaseSemaphore(python_wait_sem, 1, NULL);
+    ReleaseSemaphore(python_wait_sem, 1, NULL);
 }
 
 int TryLockPython(void)
@@ -247,6 +275,42 @@ void UnLockPython(void)
 void LockPython(void)
 {
 	WaitForSingleObject(python_sem, INFINITE);
+}
+
+/* from plc_debugger.c */
+int WaitPLC(unsigned long *tick)
+{
+    DWORD res;
+    res = WaitForSingleObject(simu_wait_sem, INFINITE);
+    if (tick)
+        *tick = __simu_tick;
+    /* Wait signal from PLC thread */
+    return res != WAIT_OBJECT_0;
+}
+
+/* Called by PLC thread when debug_publish finished
+ * This is supposed to unlock debugger thread in WaitDebugData*/
+void FinishPLC()
+{
+    /* remember tick */
+    __simu_tick = __tick;
+    /* signal debugger thread it can read data */
+    ReleaseSemaphore(simu_wait_sem, 1, NULL);
+}
+
+int TryWaitSimu(void)
+{
+    return WaitForSingleObject(simu_sem, 0) == WAIT_OBJECT_0;
+}
+
+void FinishSimu(void)
+{
+    ReleaseSemaphore(simu_sem, 1, NULL);
+}
+
+void WaitSimu(void)
+{
+    WaitForSingleObject(simu_sem, INFINITE);
 }
 
 static void __attribute__((constructor))

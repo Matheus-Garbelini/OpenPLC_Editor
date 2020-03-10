@@ -54,16 +54,28 @@ static unsigned int retain_offset = 0;
 typedef const struct {
     void *ptr;
     __IEC_types_enum type;
+    char *var_name;
+    uint8_t size;
+    uint16_t idx;
 } dbgvardsc_t;
+
+typedef const struct {
+    void *ptr;
+} dbgvar_t;
 
 static dbgvardsc_t dbgvardsc[] = {
 %(variable_decl_array)s
+};
+
+static dbgvar_t dbgvar[] = {
+%(variable_decl_array_simple)s
 };
 
 typedef void(*__for_each_variable_do_fp)(dbgvardsc_t*);
 void __for_each_variable_do(__for_each_variable_do_fp fp)
 {
     unsigned int i;
+
     for(i = 0; i < sizeof(dbgvardsc)/sizeof(dbgvardsc_t); i++){
         dbgvardsc_t *dsc = &dbgvardsc[i];
         if(dsc->type != UNKNOWN_ENUM) 
@@ -127,6 +139,7 @@ extern void InitRetain(void);
 
 void __init_debug(void)
 {
+    setbuf(stdout, NULL);
     /* init local static vars */
 #ifndef TARGET_ONLINE_DEBUG_DISABLE	
     buffer_cursor = debug_buffer;
@@ -173,6 +186,12 @@ static inline void BufferIterator(dbgvardsc_t *dsc, int do_debug)
     void *visible_value_p = NULL;
     char flags = 0;
 
+    // puts();
+    if (dsc->idx==1)
+    {        
+        // *((uint8_t *)dsc->ptr)=1;
+    }
+
     visible_value_p = UnpackVar(dsc, &real_value_p, &flags);
 
     if(flags & ( __IEC_DEBUG_FLAG | __IEC_RETAIN_FLAG)){
@@ -216,10 +235,12 @@ static inline void BufferIterator(dbgvardsc_t *dsc, int do_debug)
 }
 
 void DebugIterator(dbgvardsc_t *dsc){
+    // printf("DebugIterator\n");
     BufferIterator(dsc, 1);
 }
 
 void RetainIterator(dbgvardsc_t *dsc){
+    // printf("RetainIterator\n");
     BufferIterator(dsc, 0);
 }
 
@@ -275,6 +296,7 @@ void __publish_debug(void)
         {
             /* Reset buffer cursor */
             buffer_cursor = debug_buffer;
+            // printf("__publish_debug\n");
             /* Iterate over all variables to fill debug buffer */
             __for_each_variable_do(DebugIterator);
             
@@ -378,6 +400,15 @@ int GetDebugData(unsigned long *tick, unsigned long *size, void **buffer){
         *buffer = debug_buffer;
     }
     return wait_error;
+}
+
+uint8_t simulation_buffer[BUFFER_SIZE];
+
+int GetAllDebugData(unsigned long *tick, unsigned long *size, void **buffer){
+
+    *size = sizeof(dbgvar);
+    *buffer = dbgvar;
+    return 0;
 }
 #endif
 #endif

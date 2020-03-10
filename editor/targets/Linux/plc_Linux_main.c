@@ -73,12 +73,15 @@ void catch_signal(int sig)
 
 
 static unsigned long __debug_tick;
+static unsigned long __simu_tick;
 
 pthread_t PLC_thread;
 static pthread_mutex_t python_wait_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t python_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t debug_wait_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t debug_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t simu_wait_sem = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t simu_sem = PTHREAD_MUTEX_INITIALIZER;
 
 int PLC_shutdown = 0;
 
@@ -117,9 +120,12 @@ int startPLC(int argc,char **argv)
     pthread_mutex_init(&debug_mutex, NULL);
     pthread_mutex_init(&python_wait_mutex, NULL);
     pthread_mutex_init(&python_mutex, NULL);
+    pthread_mutex_init(&simu_wait_sem, NULL);
+    pthread_mutex_init(&simu_sem, NULL);
 
     pthread_mutex_lock(&debug_wait_mutex);
     pthread_mutex_lock(&python_wait_mutex);
+    pthread_mutex_lock(&simu_wait_sem);
 
     timer_create (CLOCK_MONOTONIC, &sigev, &PLC_timer);
     if(  __init(argc,argv) == 0 ){
@@ -164,6 +170,8 @@ int stopPLC()
     pthread_mutex_destroy(&debug_mutex);
     pthread_mutex_destroy(&python_wait_mutex);
     pthread_mutex_destroy(&python_mutex);
+    pthread_mutex_destroy(&simu_wait_sem);
+    pthread_mutex_destroy(&simu_sem);
     return 0;
 }
 
@@ -234,4 +242,43 @@ void UnLockPython(void)
 void LockPython(void)
 {
     pthread_mutex_lock(&python_mutex);
+}
+
+
+/* from plc_debugger.c */
+int WaitPLC(unsigned long *tick)
+{
+     int res;
+    if (PLC_shutdown) return 1;
+    /* Wait signal from PLC thread */
+    res = pthread_mutex_lock(&simu_wait_sem);
+    if (tick)
+     *tick = __simu_tick;
+    
+    return res;
+}
+
+/* Called by PLC thread when debug_publish finished
+ * This is supposed to unlock debugger thread in WaitDebugData*/
+void FinishPLC()
+{
+    /* remember tick */
+    __simu_tick = __simu_tick;
+    /* signal debugger thread it can read data */
+    pthread_mutex_unlock(&simu_wait_sem);
+}
+
+int TryWaitSimu(void)
+{
+    return pthread_mutex_trylock(&simu_sem) == 0;
+}
+
+void FinishSimu(void)
+{
+    pthread_mutex_unlock(&simu_sem);
+}
+
+void WaitSimu(void)
+{
+    pthread_mutex_lock(&simu_sem);
 }

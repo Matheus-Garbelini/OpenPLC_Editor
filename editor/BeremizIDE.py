@@ -39,6 +39,7 @@ from six.moves import cPickle, xrange
 import wx.lib.buttons
 import wx.lib.statbmp
 import wx.stc
+import wx
 
 
 import version
@@ -407,7 +408,8 @@ class Beremiz(IDEFrame):
         self.icon = wx.Icon(Bpath("images", "brz.ico"), wx.BITMAP_TYPE_ICO)
         self.__init_execute_path()
 
-        IDEFrame.__init__(self, parent, debug)
+        self.IDEFrame = IDEFrame.__init__(self, parent, debug)
+        
         self.Log = LogPseudoFile(self.LogConsole, self.SelectTab)
 
         self.local_runtime = None
@@ -469,8 +471,40 @@ class Beremiz(IDEFrame):
         self.RefreshAll()
         self.LogConsole.SetFocus()
 
+        # Open first recent project if there is any (for convenience)
+        try:
+            recent_projects = map(DecodeFileSystemPath,
+                                  self.GetConfigEntry("RecentProjects", []))
+        except Exception:
+            recent_projects = []
+
+        if len(recent_projects) > 0:
+            recent_projects = map(DecodeFileSystemPath, self.GetConfigEntry("RecentProjects", []))
+            self.CTR = None
+            if self.CTR is not None and not self.CheckSaveBeforeClosing():
+                return
+            try:
+                self.recent_projects = recent_projects
+                self.OpenProject(self.recent_projects[0])
+            except:
+                pass
+
+
+    def OpenFirstProgram(self):
+        tree = self.ProjectTree.GetFirstVisibleItem()    
+        # program_name = self.ProjectTree.GetFirstChild(tree)[0].GetText()
+        children = self.ProjectTree.GetFirstChild(tree)[0]
+        if children.GetChildrenCount() > 0:
+            children = self.ProjectTree.GetFirstChild(children)[0]
+
+        program_name = children.GetText()
+        tag_name = "P::" + program_name
+
+        IDEFrame.EditProjectElement(self, 1,tag_name, False)
+        self.PouInstanceVariablesPanel.SetPouType(tag_name)
+
     def RefreshTitle(self):
-        name = _("OpenPLC Editor")
+        name = _("OpenPLC Editor [SUTD Edition]")
         if self.CTR is not None:
             projectname = self.CTR.GetProjectName()
             if self.CTR.ProjectTestModified():
@@ -704,6 +738,7 @@ class Beremiz(IDEFrame):
                 return
 
             self.OpenProject(projectpath)
+
         return OpenRecentProject
 
     def GenerateMenuRecursive(self, items, menu):
@@ -736,10 +771,32 @@ class Beremiz(IDEFrame):
 
             for confnode_method in self.CTR.StatusMethods:
                 if "method" in confnode_method and confnode_method.get("shown", True):
-                    tool = StatusToolBar.AddSimpleTool(
-                        wx.ID_ANY, GetBitmap(confnode_method.get("bitmap", "Unknown")),
-                        confnode_method["tooltip"])
-                    self.Bind(wx.EVT_MENU, self.GetMenuCallBackFunction(confnode_method["method"]), tool)
+                    if "type" in confnode_method:
+                        wx_type = confnode_method["type"]
+                        if wx_type == "TextBox" and self.CTR:
+                            l1 = wx.StaticText(StatusToolBar, -1, " " + confnode_method["label"] + " ")
+                            t = wx.TextCtrl(StatusToolBar, size=(40,20),
+                                            value=self.GetConfig(confnode_method["read_method"]),
+                                            style= wx.TE_CENTRE)
+                            filler = wx.StaticText(StatusToolBar, -1, " ")
+                            StatusToolBar.AddControl(l1, "label")
+                            StatusToolBar.AddControl(t, "textBox")
+                            StatusToolBar.AddControl(filler, "filler")
+
+                            self.Bind(wx.EVT_TEXT, self.ConfigurationChangeCallback(confnode_method["method"]), t)
+                        elif wx_type == "CheckBox":
+                            cb = wx.CheckBox(StatusToolBar, -1, confnode_method["label"],
+                                 style=wx.ALIGN_RIGHT)
+                            cb.SetValue(bool(self.GetConfig(confnode_method["read_method"])))
+                            filler = wx.StaticText(StatusToolBar, -1, " ")
+                            StatusToolBar.AddControl(cb, "checkbox")
+                            StatusToolBar.AddControl(filler, "filler")
+                            self.Bind(wx.EVT_CHECKBOX, self.ConfigurationChangeCallback(confnode_method["method"]), cb)
+                    else:
+                        tool = StatusToolBar.AddSimpleTool(
+                            wx.ID_ANY, GetBitmap(confnode_method.get("bitmap", "Unknown")),
+                            confnode_method["tooltip"])
+                        self.Bind(wx.EVT_MENU, self.GetMenuCallBackFunction(confnode_method["method"]), tool)
 
             StatusToolBar.Realize()
             self.AUIManager.GetPane("StatusToolBar").BestSize(StatusToolBar.GetBestSize()).Show()
@@ -748,6 +805,21 @@ class Beremiz(IDEFrame):
         self.AUIManager.GetPane("EditorToolBar").Position(2)
         self.AUIManager.GetPane("StatusToolBar").Position(1)
         self.AUIManager.Update()
+
+
+    def GetConfig(self, text):
+        fcn_name = text.split('.')
+        fcn = self.CTR
+        for attr in fcn_name:
+            fcn = getattr(fcn, attr)
+        return fcn()
+
+    def GetConfigCallback(self, text):
+        fcn_name = text.split('.')
+        fcn = self.CTR
+        for attr in fcn_name:
+            fcn = getattr(fcn, attr)
+        return fcn
 
     def RefreshEditMenu(self):
         IDEFrame.RefreshEditMenu(self)
@@ -803,6 +875,20 @@ class Beremiz(IDEFrame):
             # Re-enable button
             event.GetEventObject().Enable()
         return OnMenu
+
+    def ConfigurationChangeCallback(self, method):
+        """Generate the callbackfunc for a given CTR method"""
+        def OnText(event):
+            # Disable button to prevent re-entrant call
+            # event.GetEventObject().Disable()
+            # Call
+            fcn = self.GetConfigCallback(method)
+            arg = event.GetEventObject().GetValue()
+            fcn(arg)
+            # Re-enable button
+            # event.GetEventObject().Enable()
+
+        return OnText
 
     def GetConfigEntry(self, entry_name, default):
         return cPickle.loads(str(self.Config.Read(entry_name, cPickle.dumps(default))))
@@ -916,6 +1002,11 @@ class Beremiz(IDEFrame):
             err = True
         self.RefreshConfigRecentProjects(projectpath, err)
         self._Refresh(TITLE, EDITORTOOLBAR, FILEMENU, EDITMENU)
+        # Open editor on the first project (for convenience)
+        try:
+            self.OpenFirstProgram()
+        except:
+            pass
 
     def OnCloseProjectMenu(self, event):
         if self.CTR is not None and not self.CheckSaveBeforeClosing():
@@ -1020,6 +1111,11 @@ class Beremiz(IDEFrame):
             elif item_infos["type"] == ITEM_PROJECT:
                 self.CTR._OpenView(onlyopened=True)
             else:
+                # tree = self.ProjectTree.GetFirstVisibleItem()    
+                # program_name = self.ProjectTree.GetFirstChild(tree)[0].GetText()            
+                # # self.Log.write(str() + "\n")
+                # self.Log.write(item_infos["tagname"] + "\n")
+                # sys.stdout.flush()
                 IDEFrame.ProjectTreeItemSelect(self, select_item)
 
     def GetProjectElementWindow(self, element, tagname):

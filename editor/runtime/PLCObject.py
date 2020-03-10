@@ -23,7 +23,7 @@
 
 
 from __future__ import absolute_import
-from threading import Thread, Lock, Semaphore, Event
+from threading import Thread, Lock, Semaphore, Event, Timer
 import ctypes
 import os
 import sys
@@ -42,6 +42,14 @@ from runtime.loglevels import LogLevelsDefault, LogLevelsCount
 from runtime.Stunnel import getPSKID
 from runtime import PlcStatus
 from runtime import MainWorker
+import importlib
+import imp
+from flask import Flask
+from flask_socketio import SocketIO
+from time import sleep
+
+
+
 
 if os.name in ("nt", "ce"):
     dlopen = _ctypes.LoadLibrary
@@ -69,6 +77,11 @@ def PLCprint(message):
 
 
 def RunInMain(func):
+
+    if func.__code__.co_argcount > 2 and \
+            'standalone' in list(func.__code__.co_varnames):
+        # Immediately returns for standalone applications
+        return func
     @wraps(func)
     def func_wrapper(*args, **kwargs):
         return MainWorker.call(func, *args, **kwargs)
@@ -77,6 +90,8 @@ def RunInMain(func):
 
 class PLCObject(object):
     def __init__(self, WorkingDir, argv, statuschange, evaluator, pyruntimevars):
+        # Initialize base class
+
         self.workingdir = WorkingDir  # must exits already
         self.tmpdir = os.path.join(WorkingDir, 'tmp')
         if os.path.exists(self.tmpdir):
@@ -98,7 +113,13 @@ class PLCObject(object):
         self.TraceLock = Lock()
         self.Traces = []
         self.DebugToken = 0
-
+        self.model_thread = None
+        self.model = None
+        # print("WorkingDir: "+ str(WorkingDir))
+        # print("argv: "+ str(argv))
+        # print("statuschange: "+ str(statuschange))
+        # print("evaluator: "+ str(evaluator))
+        # print("pyruntimevars: "+ str(pyruntimevars))
         self._init_blobs()
 
     # First task of worker -> no @RunInMain
@@ -173,15 +194,23 @@ class PLCObject(object):
     def _GetLibFileName(self):
         return os.path.join(self.workingdir, self.CurrentPLCFilename)
 
-    def _LoadPLC(self):
+    def _LoadPLC(self, library_name = None):
         """
         Load PLC library
         Declare all functions, arguments and return values
         """
-        md5 = open(self._GetMD5FileName(), "r").read()
+        if library_name == None:
+            md5 = open(self._GetMD5FileName(), "r").read()
         self.PLClibraryLock.acquire()
         try:
-            self._PLClibraryHandle = dlopen(self._GetLibFileName())
+            if library_name == None:
+                self._PLClibraryHandle = dlopen(self._GetLibFileName())
+            else:
+                md5 = [0]
+                self.workingdir = os.getcwd()
+                self.CurrentPLCFilename = library_name.split('\\')[-1]
+                # sys.path.insert(0,os.getcwd() + '/build/')
+                self._PLClibraryHandle = dlopen(library_name)
             self.PLClibraryHandle = ctypes.CDLL(self.CurrentPLCFilename, handle=self._PLClibraryHandle)
 
             self.PLC_ID = ctypes.c_char_p.in_dll(self.PLClibraryHandle, "PLC_ID")
@@ -197,6 +226,7 @@ class PLCObject(object):
 
             self._PythonIterator = getattr(self.PLClibraryHandle, "PythonIterator", None)
             if self._PythonIterator is not None:
+                # print("self._PythonIterator is not None")
                 self._PythonIterator.restype = ctypes.c_char_p
                 self._PythonIterator.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_void_p)]
 
@@ -230,6 +260,36 @@ class PLCObject(object):
             self._GetDebugData = self.PLClibraryHandle.GetDebugData
             self._GetDebugData.restype = ctypes.c_int
             self._GetDebugData.argtypes = [ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_void_p)]
+
+            self._GetAllDebugData = self.PLClibraryHandle.GetAllDebugData
+            self._GetAllDebugData.restype = ctypes.c_int
+            self._GetAllDebugData.argtypes = [ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_void_p)]
+
+            self._WaitPLC = self.PLClibraryHandle.WaitPLC
+            self._WaitPLC.restype = ctypes.c_int
+            self._WaitPLC.argtypes = [ctypes.c_uint32]
+
+            self._FinishPLC = self.PLClibraryHandle.FinishPLC
+            self._FinishPLC.restype = None
+
+            self._TryWaitSimu = self.PLClibraryHandle.TryWaitSimu
+            self._TryWaitSimu.restype = ctypes.c_int
+
+            self._FinishSimu = self.PLClibraryHandle.FinishSimu
+            self._FinishSimu.restype = None
+
+            self._WaitSimu = self.PLClibraryHandle.WaitSimu
+            self._WaitSimu.restype = None
+
+            self._SetSimulationStatus = self.PLClibraryHandle.SetSimulationStatus
+            self._SetSimulationStatus.restype = None
+            self._SetSimulationStatus.argtypes = [ctypes.c_int]
+
+            self._GetSimulationStatus = self.PLClibraryHandle.GetSimulationStatus
+            self._GetSimulationStatus.restype = ctypes.c_int8
+
+            self._config_init__ = self.PLClibraryHandle.config_init__
+            self._WaitSimu.restype = None
 
             self._suspendDebug = self.PLClibraryHandle.suspendDebug
             self._suspendDebug.restype = ctypes.c_int
@@ -392,7 +452,11 @@ class PLCObject(object):
         self.StartSem.release()
         res, cmd, blkid = "None", "None", ctypes.c_void_p()
         compile_cache = {}
+        # print("python_runtime_vars: " + str(self.python_runtime_vars))
+        #self.LogMessage("2)")
+        # print("1)")
         while True:
+            # print("2)")
             cmd = self._PythonIterator(res, blkid)
             FBID = blkid.value
             if cmd is None:
@@ -415,20 +479,207 @@ class PLCObject(object):
                 res = "#EXCEPTION : "+str(e)
                 self.LogMessage(1, ('PyEval@0x%x(Code="%s") Exception "%s"') % (FBID, cmd, str(e)))
 
+    def ThreadModelLoop(self):
+
+        try:
+            while self._GetSimulationStatus() == 1:
+                self._WaitPLC(0)
+                self.model.loop(self.PLC_VARS, self.config)
+                self.PLC_VARS.__ticks__ += 1
+                self._FinishSimu()
+        except Exception as e:
+
+            self._FinishSimu()
+            self.LogMessage(0,
+                            "Model error: " + str(e))
+            self.StopPLC()
+
+    def module_exists(self, module_name):
+        try:
+            imp.find_module(module_name)
+            return True
+        except ImportError:
+            return False
+
+    # This function dynamically generates a ctype class with the PLC variables
+    # and makes this variables available to a simple class which only holds the
+    # variable pointers
+    def GeneratePLCStruct(self, vars, buffer_ptr):
+        struct_fields = []
+        ctypes_type = None
+        # Add the correct types for the new cint struct
+        for var in vars:
+            type_name = var['type']
+            if type_name == 'BOOL':
+                ctypes_type = ctypes.c_bool
+            elif type_name == 'DINT':
+                ctypes_type = ctypes.c_int32
+            elif type_name == 'REAL':
+                ctypes_type = ctypes.c_float
+            elif type_name == 'TIME':
+                ctypes_type = ctypes.c_uint32
+            elif type_name == 'SINT':
+                ctypes_type = ctypes.c_int8
+
+            struct_fields.append((var['name'], ctypes.POINTER(ctypes_type)))
+
+        class PLC_DATA(ctypes.Structure):
+            _fields_ = struct_fields
+
+        # Cleanup the new cint class
+        pointer_class = PLC_DATA.from_address(buffer_ptr.value)
+
+        class new_class:
+            def __init__(self):
+                self.__vars__ = []
+                self.__data__ = {}
+                self.__ticks__ = 0
+                for var in vars:
+                    setattr(self,var['name'],getattr(pointer_class,var['name']).contents)
+                    self.__vars__.append(var['name'])
+                    self.__data__[var['name']] = getattr(pointer_class,var['name']).contents
+
+            def __len__(self):
+                return len(self.__vars__)
+
+            def Iterate(self):
+                return self.__data__
+
+            def GetVars(self):
+                return self.__vars__
+
+            def GetData(self):
+                obj = {}
+                for k in self.__data__:
+                    obj[k] = self.__data__[k].value
+                obj['ticks'] = self.__ticks__
+                return obj
+
+            def FillData(self, obj):
+                for k in self.__data__:
+                    obj[k] = self.__data__[k].value
+                obj['ticks'] = self.__ticks__
+                return obj
+
+        return new_class()
+
+    def import_module_safe(self, module_name):
+        sys.path.insert(0, self.ProjectPath)
+        self.model = importlib.import_module(module_name)
+
+    def SimpleLog(self,*args):
+        print(args[len(args)-1])
+
+    def ResetPLC(self):
+        self.PLC_VARS.__ticks__ = 0
+        self._config_init__()
+
     @RunInMain
-    def StartPLC(self):
+    def StartPLC(self, config, standalone = False):
         if self.CurrentPLCFilename is not None and self.PLCStatus == PlcStatus.Stopped:
+            for key in config:
+                setattr(self, key, config[key])
+
+            self.Enable_model = (config["Enable_model"]=='true')
+
+            if self.Enable_model == True:
+                self._SetSimulationStatus(1)
+
             c_argv = ctypes.c_char_p * len(self.argv)
             res = self._startPLC(len(self.argv), c_argv(*self.argv))
             if res == 0:
                 self.PLCStatus = PlcStatus.Started
                 self.StatusChange()
-                self.PythonRuntimeCall("start")
+                if standalone == False:
+                    self.PythonRuntimeCall("start")
+                else:
+                    # Change log funtion if running in standalone
+                    self.LogMessage = self.SimpleLog
+
                 self.StartSem = Semaphore(0)
                 self.PythonThread = Thread(target=self.PythonThreadProc)
                 self.PythonThread.start()
                 self.StartSem.acquire()
                 self.LogMessage("PLC started")
+
+                if self.Enable_model == True:
+
+                    if self.Script_name != '' or '.py' in self.Script_name:
+
+                        try:
+                            # format script arguments
+                            args = [v.split('=') if v != '' else None for v in self.Script_args.split(';')]
+
+                            for k in args:
+                                if k and len(k) >= 2:
+                                    config[k[0]] = k[1]
+                            # Pass callback to log messages through the IDE
+                            config['Sample_rate'] = float(self.Sample_rate)
+                            config['log'] = self.LogMessage
+                            config['StopPLC'] = self.StopPLC
+                            config['SocketIO'] = SocketIO
+                            config['Flask'] = Flask
+                            if 'standalone' not in config:
+                                config['standalone'] = False
+                            config['ResetPLC'] = self.ResetPLC
+
+                            separator = ['\\' if self.Platform == 'Win32' else '/'][0]
+                            self.script_path = self.ProjectPath + separator + self.Script_name
+                            self.LogMessage("PLCPlant model path: " + self.script_path)
+                            module_name = self.Script_name.split('.')[0]
+
+                            if self.module_exists(module_name) is False or self.model is None:
+
+                                sys.path.insert(0, self.ProjectPath)
+                                self.model = importlib.import_module(module_name)
+
+                                self.LogMessage("PLCPlant model loaded")
+                            else:
+                                imp.reload(self.model)
+                                self.LogMessage("PLCPlant model reloaded")
+
+                            # Initialize the plc structure classes
+
+                            tick1 = ctypes.c_uint32()
+                            size1 = ctypes.c_uint32()
+                            buff1 = ctypes.c_void_p()
+                            self._GetAllDebugData(ctypes.byref(tick1),
+                                                  ctypes.byref(size1),
+                                                  ctypes.byref(buff1))
+
+                            # PLCVars comes from ProjectController.py
+                            self.PLC_VARS = self.GeneratePLCStruct(self.PLCVars, buff1)
+
+                            # Generate useful class to facilitate access to configuration
+                            class new_config:
+                                def __init__(self):
+                                    for c in config:
+                                        setattr(self, c, config[c])
+
+                            self.config = new_config()
+
+
+                            # Execute script initialization
+                            self.model.setup(self.PLC_VARS, self.config)
+
+                            # Execute loop scheduler
+                            self.model_thread = Thread(target=self.ThreadModelLoop)
+                            self.model_thread.start()
+
+
+
+
+                        except Exception as e:
+                            self.LogMessage(0,
+                                            "Problem starting Model script: " + str(e) + ". Aborting model execution")
+                            self.StopPLC()
+                            return False
+                    else:
+                        self.LogMessage(0, "Script name invalid. Aborting model execution")
+                        self.StopPLC()
+                        return False
+
+
             else:
                 self.LogMessage(0, _("Problem starting PLC : error %d" % res))
                 self.PLCStatus = PlcStatus.Broken
@@ -436,8 +687,12 @@ class PLCObject(object):
 
     @RunInMain
     def StopPLC(self):
+        self._SetSimulationStatus(0)
+        self._FinishSimu()
+
         if self.PLCStatus == PlcStatus.Started:
             self.LogMessage("PLC stopped")
+
             self._stopPLC()
             self.PythonThread.join()
             self.PLCStatus = PlcStatus.Stopped
@@ -446,6 +701,13 @@ class PLCObject(object):
             if self.TraceThread is not None:
                 self.TraceThread.join()
                 self.TraceThread = None
+
+            if hasattr(self.model, 'WebServer'):
+                if self.model.WebServer.SocketIO is not None:
+                    pass
+                    # self.model.WebServer.SocketIO.stop()
+                    # self.model.WebServer.raise_exception()
+
             return True
         return False
 
@@ -503,9 +765,9 @@ class PLCObject(object):
         shutil.move(path, newpath)
 
     @RunInMain
-    def NewPLC(self, md5sum, plc_object, extrafiles):
+    def NewPLC(self, lib_name, plc_object, extrafiles):
         if self.PLCStatus in [PlcStatus.Stopped, PlcStatus.Empty, PlcStatus.Broken]:
-            NewFileName = md5sum + lib_ext
+            NewFileName = lib_name + lib_ext
             extra_files_log = os.path.join(self.workingdir, "extra_files.txt")
 
             old_PLC_filename = os.path.join(self.workingdir, self.CurrentPLCFilename) \
@@ -515,7 +777,7 @@ class PLCObject(object):
 
             self.UnLoadPLC()
 
-            self.LogMessage("NewPLC (%s)" % md5sum)
+            self.LogMessage("NewPLC (%s)" % lib_name)
             self.PLCStatus = PlcStatus.Empty
 
             try:
@@ -533,7 +795,7 @@ class PLCObject(object):
                 self._BlobAsFile(plc_object, new_PLC_filename)
 
                 # Store new PLC filename based on md5 key
-                open(self._GetMD5FileName(), "w").write(md5sum)
+                open(self._GetMD5FileName(), "w").write(lib_name)
 
                 # Then write the files
                 log = open(extra_files_log, "w")
@@ -610,6 +872,8 @@ class PLCObject(object):
             return self.PLCStatus, self._TracesSwap()
         return PlcStatus.Broken, []
 
+
+
     def TraceThreadProc(self):
         """
         Return a list of traces, corresponding to the list of required idx
@@ -620,9 +884,7 @@ class PLCObject(object):
             size = ctypes.c_uint32()
             buff = ctypes.c_void_p()
             TraceBuffer = None
-
             self.PLClibraryLock.acquire()
-
             res = self._GetDebugData(ctypes.byref(tick),
                                      ctypes.byref(size),
                                      ctypes.byref(buff))
@@ -631,9 +893,9 @@ class PLCObject(object):
                     TraceBuffer = ctypes.string_at(buff.value, size.value)
                 self._FreeDebugData()
 
+
             self.PLClibraryLock.release()
 
-            # leave thread if GetDebugData isn't happy.
             if res != 0:
                 break
 
